@@ -1,0 +1,1401 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RESTO PULSO</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+  theme: {
+    extend: {
+      colors: {
+        brand: { 50:'#fff7ed',100:'#ffedd5',200:'#fed7aa',300:'#fdba74',400:'#fb923c',500:'#f97316',600:'#ea6c0d',700:'#c2540a',800:'#9a3412',900:'#7c2d12' }
+      }
+    }
+  }
+}
+</script>
+<style>
+.sidebar-link { @apply flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium text-slate-300 hover:bg-white/10 hover:text-white transition-all; }
+.sidebar-link.active { @apply bg-brand-500 text-white shadow-lg; }
+.card { @apply bg-white rounded-2xl border border-gray-100 shadow-sm; }
+.btn-primary { @apply px-4 py-2.5 bg-brand-500 text-white rounded-xl text-sm font-semibold hover:bg-brand-600 transition-colors disabled:opacity-50; }
+.btn-secondary { @apply px-4 py-2.5 border border-gray-300 text-gray-700 rounded-xl text-sm font-medium hover:bg-gray-50 transition-colors; }
+.input { @apply w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500; }
+.modal-backdrop { @apply fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4; }
+.modal { @apply bg-white rounded-2xl shadow-2xl w-full max-h-[90vh] overflow-y-auto; }
+#toast-container { @apply fixed top-4 right-4 z-[100] flex flex-col gap-2; }
+.toast { @apply px-4 py-3 rounded-xl text-sm font-semibold shadow-lg text-white flex items-center gap-2 animate-bounce; }
+</style>
+</head>
+<body class="bg-gray-50 text-gray-900 font-sans">
+
+<!-- TOAST -->
+<div id="toast-container"></div>
+<!-- MODAL -->
+<div id="modal-container"></div>
+
+<!-- APP ROOT -->
+<div id="app"></div>
+
+<script>
+// ══════════════════════════════════════════════════════════════
+//  CONFIGURACIÓN — PEGÁ TU URL DE GOOGLE APPS SCRIPT AQUÍ ↓
+// ══════════════════════════════════════════════════════════════
+const API_URL = 'https://script.google.com/macros/s/REEMPLAZA_ESTO_CON_TU_URL_DEL_DEPLOY/exec'
+// ══════════════════════════════════════════════════════════════
+
+// ─── ESTADO GLOBAL ────────────────────────────────────────────
+let state = {
+  session: JSON.parse(localStorage.getItem('rp_session') || 'null'),
+  config: JSON.parse(localStorage.getItem('rp_config') || '{}'),
+  currentView: '',
+  data: {}
+}
+
+// ─── API ──────────────────────────────────────────────────────
+const WRITE_ACTIONS = new Set([
+  'login','logout','setupDatabase',
+  'createUser','updateUser','deleteUser',
+  'createCategory','updateCategory','deleteCategory',
+  'createProduct','updateProduct','deleteProduct',
+  'createTable','updateTable','updateTableState',
+  'createCustomer','updateCustomer','deleteCustomer',
+  'createOrder','sendToKitchen','chargeOrder','cancelOrder','createWebOrder',
+  'updateKitchenTicket',
+  'updateDelivery','createDeliveryDriver',
+  'createStockMovement',
+  'openCaja','closeCaja',
+  'createExpense','updateExpense','deleteExpense',
+  'createPromotion','updatePromotion','deletePromotion',
+  'updateConfig','changePassword',
+  'markNotificationRead',
+])
+
+async function api(action, params = {}) {
+  const token = state.session?.token || ''
+  const payload = { action, token, ...params }
+  try {
+    let res
+    if (WRITE_ACTIONS.has(action)) {
+      res = await fetch(API_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(payload)
+      })
+    } else {
+      const qs = new URLSearchParams(payload).toString()
+      res = await fetch(`${API_URL}?${qs}`)
+    }
+    return await res.json()
+  } catch (e) {
+    return { success: false, message: 'Error de red: ' + e.message }
+  }
+}
+
+// ─── TOAST ────────────────────────────────────────────────────
+function toast(msg, type = 'ok') {
+  const el = document.createElement('div')
+  el.className = `toast ${type === 'ok' ? 'bg-emerald-600' : 'bg-red-600'}`
+  el.textContent = (type === 'ok' ? '✓ ' : '✕ ') + msg
+  document.getElementById('toast-container').appendChild(el)
+  setTimeout(() => el.remove(), 3500)
+}
+
+// ─── MODAL ────────────────────────────────────────────────────
+function openModal(html) {
+  const c = document.getElementById('modal-container')
+  c.innerHTML = `<div class="modal-backdrop" id="modal-backdrop">${html}</div>`
+  document.getElementById('modal-backdrop').addEventListener('click', e => { if (e.target.id === 'modal-backdrop') closeModal() })
+}
+function closeModal() { document.getElementById('modal-container').innerHTML = '' }
+
+// ─── FORMAT ───────────────────────────────────────────────────
+function fmt(n) { return (state.config.symbol || '$') + ' ' + (parseFloat(n)||0).toLocaleString('es-AR',{minimumFractionDigits:2,maximumFractionDigits:2}) }
+function fmtDate(s) { if (!s) return '—'; try { return new Date(s).toLocaleDateString('es-AR') } catch(e) { return s } }
+function fmtDT(s) { if (!s) return '—'; try { return new Date(s).toLocaleString('es-AR',{dateStyle:'short',timeStyle:'short'}) } catch(e) { return s } }
+function escHtml(s) { const d=document.createElement('div');d.textContent=s||'';return d.innerHTML }
+
+// ─── BADGE ────────────────────────────────────────────────────
+const ORDER_COLORS = { NUEVO:'bg-blue-100 text-blue-700', EN_COCINA:'bg-orange-100 text-orange-700', LISTO:'bg-green-100 text-green-700', COBRADO:'bg-gray-100 text-gray-600', CANCELADO:'bg-red-100 text-red-700', EN_CAMINO:'bg-purple-100 text-purple-700' }
+function badge(txt, cls) { return `<span class="px-2 py-0.5 rounded-full text-xs font-semibold ${cls||ORDER_COLORS[txt]||'bg-gray-100 text-gray-600'}">${txt}</span>` }
+
+// ─── AUTH GUARD ───────────────────────────────────────────────
+function requireAuth() { if (!state.session) { navigate('login'); return false } return true }
+
+// ─── ROUTER ───────────────────────────────────────────────────
+function navigate(view, params = {}) {
+  state.currentView = view
+  state.data = params
+  render()
+}
+
+function render() {
+  const app = document.getElementById('app')
+  const v = state.currentView
+
+  // Public views
+  const sp = new URLSearchParams(location.search)
+  if (sp.get('view') === 'menu') { renderMenu(); return }
+  if (sp.get('view') === 'tracking') { renderTracking(sp.get('id')); return }
+
+  if (!state.session && v !== 'login') { renderLogin(); return }
+  if (v === 'login') { renderLogin(); return }
+
+  app.innerHTML = `
+    <div class="flex h-screen overflow-hidden">
+      ${renderSidebar()}
+      <main class="flex-1 overflow-y-auto" id="main-content">
+        <div id="view-content" class="p-4 lg:p-6 max-w-6xl mx-auto"></div>
+      </main>
+    </div>
+  `
+  document.querySelectorAll('.sidebar-link').forEach(el => {
+    if (el.dataset.view === v) el.classList.add('active')
+    el.addEventListener('click', () => navigate(el.dataset.view))
+  })
+  document.getElementById('btn-logout')?.addEventListener('click', doLogout)
+  document.getElementById('btn-hamburger')?.addEventListener('click', toggleSidebar)
+
+  const vc = document.getElementById('view-content')
+  const views = { dashboard: viewDashboard, mesas: viewMesas, pedidos: viewPedidos, nuevoPedido: viewNuevoPedido, cocina: viewCocina, delivery: viewDelivery, productos: viewProductos, clientes: viewClientes, caja: viewCaja, gastos: viewGastos, promociones: viewPromociones, reportes: viewReportes, usuarios: viewUsuarios, configuracion: viewConfiguracion }
+  if (views[v]) views[v](vc)
+  else viewDashboard(vc)
+}
+
+function renderSidebar() {
+  const rol = state.session?.rol || ''
+  const links = [
+    { view:'dashboard', icon:'📊', label:'Dashboard' },
+    { view:'mesas', icon:'🪑', label:'Mesas', roles:['ADMIN','ENCARGADO','MOZO','CAJERO'] },
+    { view:'pedidos', icon:'📋', label:'Pedidos' },
+    { view:'cocina', icon:'🍳', label:'Cocina', roles:['ADMIN','ENCARGADO','COCINA'] },
+    { view:'delivery', icon:'🛵', label:'Delivery', roles:['ADMIN','ENCARGADO','DELIVERY','CAJERO'] },
+    { view:'productos', icon:'🍽️', label:'Productos', roles:['ADMIN','ENCARGADO'] },
+    { view:'clientes', icon:'👥', label:'Clientes', roles:['ADMIN','ENCARGADO','CAJERO'] },
+    { view:'caja', icon:'💰', label:'Caja', roles:['ADMIN','ENCARGADO','CAJERO'] },
+    { view:'gastos', icon:'💸', label:'Gastos', roles:['ADMIN','ENCARGADO'] },
+    { view:'promociones', icon:'🏷️', label:'Promos', roles:['ADMIN','ENCARGADO'] },
+    { view:'reportes', icon:'📈', label:'Reportes', roles:['ADMIN','ENCARGADO'] },
+    { view:'usuarios', icon:'👤', label:'Usuarios', roles:['ADMIN'] },
+    { view:'configuracion', icon:'⚙️', label:'Config', roles:['ADMIN'] },
+  ]
+  const linksHtml = links.filter(l => !l.roles || l.roles.includes(rol))
+    .map(l => `<a class="sidebar-link" data-view="${l.view}"><span>${l.icon}</span>${l.label}</a>`).join('')
+  return `
+    <aside id="sidebar" class="w-64 bg-slate-800 flex flex-col shrink-0 hidden lg:flex">
+      <div class="p-4 border-b border-white/10">
+        <div class="flex items-center gap-2">
+          <div class="w-8 h-8 rounded-lg bg-brand-500 flex items-center justify-center text-white font-black text-sm">R</div>
+          <span class="font-black text-white text-lg">RESTO PULSO</span>
+        </div>
+        <p class="text-slate-400 text-xs mt-1">${escHtml(state.session?.nombre||'')} · ${escHtml(state.session?.rol||'')}</p>
+      </div>
+      <nav class="flex-1 overflow-y-auto p-3 space-y-0.5">${linksHtml}</nav>
+      <div class="p-3 border-t border-white/10">
+        <button id="btn-logout" class="w-full text-left sidebar-link text-red-400 hover:text-red-300">🚪 Cerrar sesión</button>
+      </div>
+    </aside>
+    <div class="lg:hidden fixed top-0 left-0 right-0 bg-slate-800 z-40 px-4 py-3 flex items-center justify-between">
+      <span class="font-black text-white">RESTO PULSO</span>
+      <button id="btn-hamburger" class="text-white text-xl">☰</button>
+    </div>
+    <div class="lg:hidden h-14"></div>
+  `
+}
+
+function toggleSidebar() {
+  const s = document.getElementById('sidebar')
+  if (s) s.classList.toggle('hidden')
+}
+
+// ─── LOGIN ────────────────────────────────────────────────────
+function renderLogin() {
+  document.getElementById('app').innerHTML = `
+    <div class="min-h-screen bg-gradient-to-br from-slate-800 to-slate-900 flex items-center justify-center p-4">
+      <div class="w-full max-w-sm">
+        <div class="text-center mb-8">
+          <div class="w-16 h-16 rounded-2xl bg-brand-500 flex items-center justify-center mx-auto mb-4 text-white text-3xl font-black">R</div>
+          <h1 class="text-3xl font-black text-white">RESTO PULSO</h1>
+          <p class="text-slate-400 text-sm mt-1">Sistema de gestión gastronómica</p>
+        </div>
+        <div class="bg-white rounded-2xl shadow-2xl p-6 space-y-4">
+          <div>
+            <label class="text-xs font-semibold text-gray-600 mb-1 block">Email</label>
+            <input id="login-email" type="email" value="admin@restopulso.local" class="input" placeholder="tu@email.com">
+          </div>
+          <div>
+            <label class="text-xs font-semibold text-gray-600 mb-1 block">Contraseña</label>
+            <input id="login-pass" type="password" value="Admin123!" class="input">
+          </div>
+          <button id="btn-login" class="w-full py-3 bg-brand-500 text-white font-black rounded-xl hover:bg-brand-600 transition-colors">
+            Ingresar
+          </button>
+          <p class="text-xs text-gray-400 text-center">Primera vez: ejecutá setupDatabase() en Apps Script</p>
+        </div>
+      </div>
+    </div>
+  `
+  document.getElementById('btn-login').addEventListener('click', doLogin)
+  document.getElementById('login-pass').addEventListener('keydown', e => { if(e.key==='Enter') doLogin() })
+}
+
+async function doLogin() {
+  const email = document.getElementById('login-email').value
+  const password = document.getElementById('login-pass').value
+  const btn = document.getElementById('btn-login')
+  btn.textContent = 'Ingresando…'; btn.disabled = true
+  const res = await api('login', { email, password })
+  btn.textContent = 'Ingresar'; btn.disabled = false
+  if (res.success) {
+    state.session = { ...res.data.usuario, token: res.data.token }
+    localStorage.setItem('rp_session', JSON.stringify(state.session))
+    navigate('dashboard')
+  } else {
+    toast(res.message || 'Error al ingresar', 'err')
+  }
+}
+
+async function doLogout() {
+  await api('logout')
+  state.session = null
+  localStorage.removeItem('rp_session')
+  navigate('login')
+}
+
+// ─── DASHBOARD ────────────────────────────────────────────────
+async function viewDashboard(el) {
+  el.innerHTML = '<p class="text-gray-400 text-sm">Cargando dashboard…</p>'
+  const res = await api('getDashboard')
+  if (!res.success) { el.innerHTML = `<p class="text-red-500">${res.message}</p>`; return }
+  const d = res.data
+  const r = d.resumen || {}
+  el.innerHTML = `
+    <h1 class="text-2xl font-black mb-6">Dashboard</h1>
+    <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+      ${kpiCard('Ventas hoy', fmt(r.ventasHoy||0), '💰', 'text-brand-600')}
+      ${kpiCard('Pedidos hoy', r.pedidosHoy||0, '📋', 'text-blue-600')}
+      ${kpiCard('Pedidos activos', r.pedidosActivos||0, '🔥', 'text-orange-600')}
+      ${kpiCard('Mesas ocupadas', r.mesasOcupadas||0, '🪑', 'text-purple-600')}
+    </div>
+    <div class="grid lg:grid-cols-2 gap-4">
+      <div class="card p-5">
+        <h2 class="font-bold text-gray-700 mb-4 text-sm">Ventas últimos 7 días</h2>
+        <div class="space-y-2">
+          ${(d.ventas7d||[]).map(v => {
+            const max = Math.max(...(d.ventas7d||[]).map(x=>x.total),1)
+            const pct = Math.round((v.total/max)*100)
+            return `<div class="flex items-center gap-3 text-xs">
+              <span class="w-10 text-gray-400 text-right">${v.dia}</span>
+              <div class="flex-1 bg-gray-100 rounded-full h-2">
+                <div class="bg-brand-500 h-2 rounded-full" style="width:${pct}%"></div>
+              </div>
+              <span class="w-20 text-right font-semibold text-gray-700">${fmt(v.total)}</span>
+            </div>`
+          }).join('')}
+        </div>
+      </div>
+      <div class="card p-5">
+        <h2 class="font-bold text-gray-700 mb-4 text-sm">Top productos hoy</h2>
+        <div class="space-y-2">
+          ${(d.topProducts||[]).length ? (d.topProducts||[]).map((p,i) => `
+            <div class="flex justify-between items-center text-sm">
+              <span class="flex items-center gap-2"><span class="text-gray-400 w-5 text-right">${i+1}.</span>${escHtml(p.nombre)}</span>
+              <span class="font-bold text-gray-700 bg-gray-100 rounded-lg px-2 py-0.5 text-xs">${p.cantidad} uds</span>
+            </div>`).join('') : '<p class="text-gray-400 text-sm">Sin ventas hoy</p>'}
+        </div>
+      </div>
+    </div>
+    <div class="mt-4 card p-5">
+      <h2 class="font-bold text-gray-700 mb-4 text-sm">Accesos rápidos</h2>
+      <div class="flex flex-wrap gap-3">
+        <button onclick="navigate('nuevoPedido')" class="btn-primary">+ Nuevo pedido</button>
+        <button onclick="navigate('mesas')" class="btn-secondary">🪑 Ver mesas</button>
+        <button onclick="navigate('cocina')" class="btn-secondary">🍳 Cocina</button>
+        <button onclick="navigate('caja')" class="btn-secondary">💰 Caja</button>
+      </div>
+    </div>
+  `
+}
+
+function kpiCard(label, value, icon, colorClass) {
+  return `<div class="card p-4">
+    <div class="flex items-start justify-between">
+      <div><p class="text-xs text-gray-500 mb-1">${label}</p><p class="text-2xl font-black ${colorClass}">${value}</p></div>
+      <span class="text-2xl">${icon}</span>
+    </div>
+  </div>`
+}
+
+// ─── MESAS ────────────────────────────────────────────────────
+async function viewMesas(el) {
+  el.innerHTML = '<p class="text-gray-400 text-sm">Cargando…</p>'
+  const [mesasRes, pedidosRes] = await Promise.all([api('getTables'), api('getOrders')])
+  const mesas = mesasRes.data || []
+  const pedidos = pedidosRes.data || []
+  const activosPorMesa = {}
+  pedidos.filter(p => p.estado !== 'COBRADO' && p.estado !== 'CANCELADO' && p.mesaId).forEach(p => { activosPorMesa[p.mesaId] = p })
+
+  el.innerHTML = `
+    <div class="flex items-center justify-between mb-6">
+      <h1 class="text-2xl font-black">Mesas</h1>
+      <button onclick="navigate('nuevoPedido')" class="btn-primary">+ Nuevo pedido</button>
+    </div>
+    <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
+      ${mesas.map(m => {
+        const pedido = activosPorMesa[m.id]
+        const color = m.estado === 'LIBRE' ? 'border-2 border-emerald-300 bg-emerald-50' : m.estado === 'OCUPADA' ? 'border-2 border-orange-300 bg-orange-50' : 'border-2 border-gray-200 bg-gray-50'
+        return `<div class="card p-4 cursor-pointer hover:shadow-md transition-shadow ${color}" onclick="onMesaClick('${m.id}','${m.estado}')">
+          <div class="text-center">
+            <div class="text-2xl font-black ${m.estado==='LIBRE'?'text-emerald-700':'text-orange-700'}">${m.numero}</div>
+            <div class="text-xs font-semibold text-gray-600 mt-1">${escHtml(m.nombre)}</div>
+            <div class="mt-2">${badge(m.estado, m.estado==='LIBRE'?'bg-emerald-100 text-emerald-700':'bg-orange-100 text-orange-700')}</div>
+            ${pedido ? `<div class="mt-2 text-xs text-gray-500">${fmt(pedido.total)}</div>` : ''}
+          </div>
+        </div>`
+      }).join('')}
+    </div>
+  `
+  window.onMesaClick = async (id, estado) => {
+    if (estado === 'LIBRE') {
+      navigate('nuevoPedido', { mesaId: id, mesaNombre: mesas.find(m=>m.id===id)?.nombre })
+    } else {
+      const pedido = activosPorMesa[id]
+      if (pedido) showOrderDetail(pedido.id)
+    }
+  }
+}
+
+// ─── PEDIDOS ──────────────────────────────────────────────────
+async function viewPedidos(el) {
+  el.innerHTML = '<p class="text-gray-400 text-sm">Cargando…</p>'
+  let filter = 'active'
+  const load = async () => {
+    let params = {}
+    if (filter === 'today') params.fecha = new Date().toISOString().split('T')[0]
+    else if (filter !== 'active' && filter !== 'all') params.estado = filter
+    const res = await api('getOrders', params)
+    let orders = res.data || []
+    if (filter === 'active') orders = orders.filter(o => o.estado !== 'COBRADO' && o.estado !== 'CANCELADO')
+    el.innerHTML = `
+      <div class="flex items-center justify-between mb-4">
+        <h1 class="text-2xl font-black">Pedidos</h1>
+        <div class="flex gap-2">
+          <button onclick="navigate('mesas')" class="btn-secondary text-xs">🪑 Mesas</button>
+          <button onclick="navigate('nuevoPedido')" class="btn-primary text-sm">+ Nuevo</button>
+        </div>
+      </div>
+      <div class="flex gap-2 flex-wrap mb-4">
+        ${['active','today','COBRADO','CANCELADO','all'].map((f,_,arr) => {
+          const labels = {active:'Activos',today:'Hoy',COBRADO:'Cobrados',CANCELADO:'Cancelados',all:'Todos'}
+          return `<button onclick="setFilter('${f}')" class="px-3 py-1.5 rounded-full text-xs font-semibold transition-colors ${filter===f?'bg-brand-500 text-white':'bg-white border border-gray-200 text-gray-600'}">${labels[f]}</button>`
+        }).join('')}
+      </div>
+      ${orders.length === 0 ? '<div class="card p-8 text-center text-gray-400">No hay pedidos</div>' : `
+      <div class="space-y-2">
+        ${orders.map(o => `
+          <div class="card p-4 cursor-pointer hover:shadow-md transition-shadow" onclick="showOrderDetail('${o.id}')">
+            <div class="flex justify-between items-start">
+              <div>
+                <span class="font-black text-gray-900">#${o.numero}</span>
+                <span class="ml-2 text-xs text-gray-500">${o.tipo}</span>
+                ${o.mesaId ? `<span class="ml-2 text-xs text-gray-400">Mesa</span>` : ''}
+              </div>
+              <div class="text-right">
+                <div class="font-black text-brand-600">${fmt(o.total)}</div>
+                <div class="text-xs text-gray-400">${fmtDT(o.creadoEn)}</div>
+              </div>
+            </div>
+            <div class="mt-2">${badge(o.estado)}</div>
+          </div>`).join('')}
+      </div>`}
+    `
+    document.querySelectorAll('[onclick^="setFilter"]').forEach(b => {
+      b.addEventListener('click', function() {})
+    })
+  }
+  window.setFilter = f => { filter = f; load() }
+  await load()
+}
+
+async function showOrderDetail(id) {
+  const res = await api('getOrder', { id, withItems: true })
+  if (!res.success) { toast(res.message, 'err'); return }
+  const o = res.data
+  const canAction = o.estado !== 'COBRADO' && o.estado !== 'CANCELADO'
+  openModal(`
+    <div class="modal max-w-lg">
+      <div class="p-5 space-y-4">
+        <div class="flex justify-between items-center">
+          <h2 class="text-xl font-black">Pedido #${o.numero}</h2>
+          <button onclick="closeModal()" class="text-gray-400 hover:text-gray-600 text-xl">✕</button>
+        </div>
+        <div class="flex flex-wrap gap-2">${badge(o.estado)} ${badge(o.tipo,'bg-blue-100 text-blue-700')}</div>
+        <div class="bg-gray-50 rounded-xl p-4 space-y-2">
+          ${(o.items||[]).map(it => `<div class="flex justify-between text-sm">
+            <span><span class="font-bold">${it.cantidad}x</span> ${escHtml(it.productoNombre)} ${it.observacion?`<span class="text-gray-400 text-xs">— ${escHtml(it.observacion)}</span>`:''}</span>
+            <span class="font-semibold">${fmt(it.subtotal)}</span>
+          </div>`).join('')}
+          <div class="pt-2 border-t border-gray-200 space-y-1 text-sm">
+            ${o.descuento > 0 ? `<div class="flex justify-between text-red-600"><span>Descuento</span><span>-${fmt(o.descuento)}</span></div>` : ''}
+            ${o.costoDelivery > 0 ? `<div class="flex justify-between text-gray-500"><span>Delivery</span><span>${fmt(o.costoDelivery)}</span></div>` : ''}
+            <div class="flex justify-between font-black text-lg"><span>Total</span><span class="text-brand-600">${fmt(o.total)}</span></div>
+          </div>
+        </div>
+        ${canAction ? `<div class="grid grid-cols-2 gap-2">
+          ${o.estado==='NUEVO' ? `<button onclick="doSendKitchen('${o.id}')" class="py-3 bg-orange-500 text-white font-bold rounded-xl hover:bg-orange-600 text-sm">🍳 Enviar a cocina</button>` : ''}
+          <button onclick="openChargeModal('${o.id}','${o.total}')" class="py-3 bg-emerald-500 text-white font-bold rounded-xl hover:bg-emerald-600 text-sm">💳 Cobrar</button>
+          <button onclick="doCancelOrder('${o.id}')" class="py-3 bg-red-100 text-red-700 font-bold rounded-xl hover:bg-red-200 text-sm">✕ Cancelar</button>
+        </div>` : ''}
+      </div>
+    </div>
+  `)
+}
+
+window.doSendKitchen = async id => {
+  const res = await api('sendToKitchen', { id })
+  if (res.success) { toast('Enviado a cocina'); closeModal() } else toast(res.message, 'err')
+}
+window.doCancelOrder = async id => {
+  if (!confirm('¿Cancelar este pedido?')) return
+  const res = await api('cancelOrder', { id, motivo: 'Cancelado por operador' })
+  if (res.success) { toast('Pedido cancelado'); closeModal(); navigate('pedidos') } else toast(res.message, 'err')
+}
+window.openChargeModal = async (id, total) => {
+  const totalNum = parseFloat(total)
+  openModal(`
+    <div class="modal max-w-sm">
+      <div class="p-5 space-y-4">
+        <div class="flex justify-between items-center">
+          <h2 class="font-black text-xl">Cobrar pedido</h2>
+          <button onclick="closeModal()" class="text-gray-400 text-xl">✕</button>
+        </div>
+        <div class="text-center"><p class="text-sm text-gray-500">Total</p><p class="text-4xl font-black text-brand-600">${fmt(totalNum)}</p></div>
+        <div id="payments-list">
+          <div class="flex gap-2 mb-2">
+            <select class="input payment-method flex-1"><option>EFECTIVO</option><option>TARJETA</option><option>TRANSFERENCIA</option><option>MERCADO_PAGO</option><option>OTRO</option></select>
+            <input type="number" class="input payment-amount w-32" value="${totalNum.toFixed(2)}">
+          </div>
+        </div>
+        <button onclick="addPaymentRow()" class="text-sm text-brand-600 font-medium hover:underline">+ Agregar método</button>
+        <button onclick="doCharge('${id}')" class="w-full py-3.5 bg-emerald-500 text-white font-black rounded-xl hover:bg-emerald-600">✓ Confirmar cobro</button>
+      </div>
+    </div>
+  `)
+  window.addPaymentRow = () => {
+    const div = document.createElement('div')
+    div.className = 'flex gap-2 mb-2'
+    div.innerHTML = `<select class="input payment-method flex-1"><option>EFECTIVO</option><option>TARJETA</option><option>TRANSFERENCIA</option><option>MERCADO_PAGO</option><option>OTRO</option></select><input type="number" class="input payment-amount w-32" value="0"><button onclick="this.parentNode.remove()" class="text-red-400 px-2">✕</button>`
+    document.getElementById('payments-list').appendChild(div)
+  }
+  window.doCharge = async (pedidoId) => {
+    const methods = document.querySelectorAll('.payment-method')
+    const amounts = document.querySelectorAll('.payment-amount')
+    const pagos = []
+    methods.forEach((m,i) => { pagos.push({ metodo: m.value, monto: parseFloat(amounts[i].value)||0 }) })
+    const totalPagado = pagos.reduce((s,p) => s+p.monto, 0)
+    if (Math.abs(totalPagado - totalNum) > 0.5) { toast('El total no coincide', 'err'); return }
+    const res = await api('chargeOrder', { id: pedidoId, pagos })
+    if (res.success) { toast('Pedido cobrado'); closeModal(); navigate('pedidos') } else toast(res.message, 'err')
+  }
+}
+
+// ─── NUEVO PEDIDO (POS) ───────────────────────────────────────
+async function viewNuevoPedido(el) {
+  el.innerHTML = '<p class="text-gray-400 text-sm">Cargando…</p>'
+  const [catsRes, prodsRes, clientesRes] = await Promise.all([api('getCategories'), api('getProducts'), api('getCustomers')])
+  const cats = catsRes.data || []
+  const prods = (prodsRes.data || []).filter(p => p.activo)
+  const clientes = clientesRes.data || []
+  const mesaId = state.data?.mesaId || ''
+  const mesaNombre = state.data?.mesaNombre || ''
+
+  let cart = []
+  let activeCat = 'all'
+  let selectedCliente = null
+  let tipoOrden = mesaId ? 'MESA' : 'MESA'
+  let observaciones = ''
+
+  const renderPOS = () => {
+    const filtered = prods.filter(p => activeCat === 'all' || p.categoriaId === activeCat)
+    const subtotal = cart.reduce((s,i) => s + i.precio * i.cantidad, 0)
+    const costoDelivery = tipoOrden === 'DELIVERY' ? (parseFloat(state.config.costoDelivery)||0) : 0
+    const total = subtotal + costoDelivery
+
+    el.innerHTML = `
+      <div class="flex items-center gap-3 mb-4">
+        <button onclick="navigate('mesas')" class="text-sm text-brand-600 font-medium">← Volver</button>
+        <h1 class="text-xl font-black">Nuevo Pedido${mesaNombre?' — '+escHtml(mesaNombre):''}</h1>
+      </div>
+      <div class="grid lg:grid-cols-5 gap-4">
+        <!-- Productos -->
+        <div class="lg:col-span-3 space-y-3">
+          <div class="flex gap-2 overflow-x-auto pb-1">
+            <button onclick="setCat('all')" class="px-3 py-1.5 rounded-full text-xs font-semibold flex-shrink-0 transition-colors ${activeCat==='all'?'bg-brand-500 text-white':'bg-white border border-gray-200 text-gray-600'}">Todo</button>
+            ${cats.map(c => `<button onclick="setCat('${c.id}')" class="px-3 py-1.5 rounded-full text-xs font-semibold flex-shrink-0 transition-colors ${activeCat===c.id?'bg-brand-500 text-white':'bg-white border border-gray-200 text-gray-600'}">${c.icono} ${escHtml(c.nombre)}</button>`).join('')}
+          </div>
+          <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
+            ${filtered.map(p => `
+              <button onclick="addToCart('${p.id}')" class="card p-3 text-left hover:shadow-md transition-shadow">
+                <p class="font-bold text-sm text-gray-900 leading-tight">${escHtml(p.nombre)}</p>
+                <p class="text-brand-600 font-black mt-1">${fmt(p.precio)}</p>
+              </button>`).join('')}
+          </div>
+        </div>
+        <!-- Carrito -->
+        <div class="lg:col-span-2 space-y-3">
+          <div class="card p-4 space-y-2">
+            <h2 class="font-bold text-gray-700 text-sm">Carrito</h2>
+            <div>
+              <label class="text-xs text-gray-500">Tipo</label>
+              <select id="tipo-orden" onchange="setTipo(this.value)" class="input mt-1">
+                <option value="MESA" ${tipoOrden==='MESA'?'selected':''}>Mesa${mesaNombre?' — '+mesaNombre:''}</option>
+                <option value="TAKE_AWAY" ${tipoOrden==='TAKE_AWAY'?'selected':''}>Take Away</option>
+                <option value="DELIVERY" ${tipoOrden==='DELIVERY'?'selected':''}>Delivery</option>
+              </select>
+            </div>
+            <div>
+              <label class="text-xs text-gray-500">Cliente (opcional)</label>
+              <select id="cliente-select" onchange="setCliente(this.value)" class="input mt-1">
+                <option value="">— Sin cliente —</option>
+                ${clientes.map(c => `<option value="${c.id}" ${selectedCliente===c.id?'selected':''}>${escHtml(c.nombre)} · ${escHtml(c.telefono)}</option>`).join('')}
+              </select>
+            </div>
+            ${cart.length === 0 ? '<p class="text-gray-400 text-xs text-center py-4">El carrito está vacío</p>' : `
+            <div class="space-y-2 max-h-48 overflow-y-auto">
+              ${cart.map((item,idx) => `
+                <div class="flex items-center gap-2">
+                  <button onclick="changeQty(${idx},-1)" class="w-7 h-7 bg-gray-100 rounded-lg text-sm flex items-center justify-center">−</button>
+                  <span class="w-5 text-center font-bold text-sm">${item.cantidad}</span>
+                  <button onclick="changeQty(${idx},1)" class="w-7 h-7 bg-brand-500 rounded-lg text-sm flex items-center justify-center text-white">+</button>
+                  <span class="flex-1 text-xs text-gray-700">${escHtml(item.nombre)}</span>
+                  <span class="text-xs font-semibold text-gray-900">${fmt(item.precio*item.cantidad)}</span>
+                </div>`).join('')}
+            </div>`}
+            <div class="space-y-1 pt-2 border-t border-gray-100 text-sm">
+              ${costoDelivery > 0 ? `<div class="flex justify-between text-gray-500"><span>Delivery</span><span>${fmt(costoDelivery)}</span></div>` : ''}
+              <div class="flex justify-between font-black text-base"><span>Total</span><span class="text-brand-600">${fmt(total)}</span></div>
+            </div>
+            <div>
+              <label class="text-xs text-gray-500">Observaciones</label>
+              <input id="obs-input" value="${escHtml(observaciones)}" oninput="observaciones=this.value" class="input mt-1 text-xs" placeholder="Sin sal, alergia…">
+            </div>
+            <button onclick="submitOrder()" ${cart.length===0?'disabled':''} class="w-full py-3 bg-brand-500 text-white font-black rounded-xl hover:bg-brand-600 disabled:opacity-50">
+              Confirmar pedido
+            </button>
+          </div>
+        </div>
+      </div>
+    `
+
+    window.setCat = c => { activeCat = c; renderPOS() }
+    window.setTipo = t => { tipoOrden = t; renderPOS() }
+    window.setCliente = v => { selectedCliente = v || null; renderPOS() }
+    window.addToCart = pId => {
+      const prod = prods.find(p => p.id === pId)
+      if (!prod) return
+      const idx = cart.findIndex(i => i.id === pId)
+      if (idx >= 0) cart[idx].cantidad++
+      else cart.push({ id: pId, nombre: prod.nombre, precio: prod.precio, cantidad: 1 })
+      renderPOS()
+    }
+    window.changeQty = (idx, delta) => {
+      cart[idx].cantidad += delta
+      if (cart[idx].cantidad <= 0) cart.splice(idx, 1)
+      renderPOS()
+    }
+    window.submitOrder = async () => {
+      if (!cart.length) return
+      observaciones = document.getElementById('obs-input')?.value || observaciones
+      const items = cart.map(i => ({ productoId: i.id, cantidad: i.cantidad }))
+      const res = await api('createOrder', { tipo: tipoOrden, mesaId, clienteId: selectedCliente||'', items, observaciones })
+      if (res.success) {
+        toast('Pedido creado — #' + res.data.numero)
+        navigate('pedidos')
+      } else toast(res.message, 'err')
+    }
+  }
+  renderPOS()
+}
+
+// ─── COCINA ───────────────────────────────────────────────────
+async function viewCocina(el) {
+  el.innerHTML = '<p class="text-gray-400 text-sm">Cargando…</p>'
+  const load = async () => {
+    const res = await api('getKitchenTickets')
+    const tickets = res.data || []
+    const pendientes = tickets.filter(t => t.estado === 'PENDIENTE')
+    const enProceso = tickets.filter(t => t.estado === 'EN_PROCESO')
+    const listos = tickets.filter(t => t.estado === 'LISTO')
+    const renderCol = (title, color, items, nextState, nextLabel) => `
+      <div>
+        <h2 class="font-black text-sm mb-3 flex items-center gap-2">
+          <span class="w-3 h-3 rounded-full ${color}"></span>${title}
+          <span class="bg-gray-200 text-gray-700 rounded-full px-2 py-0.5 text-xs">${items.length}</span>
+        </h2>
+        <div class="space-y-2">
+          ${items.map(t => `
+            <div class="card p-3 space-y-2">
+              <div class="flex justify-between items-start">
+                <div>
+                  <p class="font-bold text-sm">${escHtml(t.productoNombre)}</p>
+                  <p class="text-brand-600 font-black text-lg">× ${t.cantidad}</p>
+                </div>
+                <div class="text-right text-xs text-gray-400">
+                  <div>${escHtml(t.mesaInfo || t.tipoPedido || '')}</div>
+                  <div>${fmtDT(t.creadoEn)}</div>
+                </div>
+              </div>
+              ${t.observacion ? `<p class="text-xs bg-yellow-50 border border-yellow-200 rounded-lg p-2 text-yellow-800">📝 ${escHtml(t.observacion)}</p>` : ''}
+              <button onclick="doUpdateTicket('${t.id}','${nextState}')" class="w-full py-2 text-sm font-bold bg-slate-800 text-white rounded-xl hover:bg-slate-700">
+                ${nextLabel}
+              </button>
+            </div>`).join('')}
+        </div>
+      </div>
+    `
+    el.innerHTML = `
+      <div class="flex items-center justify-between mb-4">
+        <h1 class="text-2xl font-black">Cocina</h1>
+        <button onclick="viewCocina(document.getElementById('view-content'))" class="btn-secondary text-sm">↻ Actualizar</button>
+      </div>
+      <div class="grid grid-cols-3 gap-4">
+        ${renderCol('Pendientes','bg-blue-500', pendientes, 'EN_PROCESO', '▶ Empezar')}
+        ${renderCol('En proceso','bg-orange-500', enProceso, 'LISTO', '✓ Listo')}
+        ${renderCol('Listos','bg-green-500', listos, 'ENTREGADO', '🚀 Entregado')}
+      </div>
+    `
+    window.doUpdateTicket = async (id, estado) => {
+      const res = await api('updateKitchenTicket', { id, estado })
+      if (res.success) load() else toast(res.message, 'err')
+    }
+  }
+  await load()
+}
+
+// ─── DELIVERY ─────────────────────────────────────────────────
+async function viewDelivery(el) {
+  el.innerHTML = '<p class="text-gray-400 text-sm">Cargando…</p>'
+  const res = await api('getDeliveries')
+  const list = res.data || []
+  el.innerHTML = `
+    <div class="flex items-center justify-between mb-4">
+      <h1 class="text-2xl font-black">Delivery</h1>
+      <button onclick="viewDelivery(document.getElementById('view-content'))" class="btn-secondary text-sm">↻ Actualizar</button>
+    </div>
+    ${list.length === 0 ? '<div class="card p-8 text-center text-gray-400">No hay deliveries activos</div>' : `
+    <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+      ${list.map(d => `
+        <div class="card p-4 space-y-3">
+          <div class="flex justify-between items-start">
+            <div>
+              <p class="font-black text-gray-900">Pedido #${d.pedidoId?.split('-')[1]||d.pedidoId}</p>
+              <p class="text-sm text-gray-600">${escHtml(d.direccion)}</p>
+              ${d.barrio ? `<p class="text-xs text-gray-400">${escHtml(d.barrio)}</p>` : ''}
+              ${d.referencia ? `<p class="text-xs text-gray-400">${escHtml(d.referencia)}</p>` : ''}
+            </div>
+            ${badge(d.estado)}
+          </div>
+          <div class="flex gap-2 flex-wrap">
+            ${d.estado==='PENDIENTE' ? `<button onclick="doUpdateDelivery('${d.id}','EN_CAMINO')" class="btn-primary text-xs py-1.5">🛵 Enviar</button>` : ''}
+            ${d.estado==='EN_CAMINO' ? `<button onclick="doUpdateDelivery('${d.id}','ENTREGADO')" class="btn-primary text-xs py-1.5 bg-emerald-500 hover:bg-emerald-600">✓ Entregado</button>` : ''}
+          </div>
+        </div>`).join('')}
+    </div>`}
+  `
+  window.doUpdateDelivery = async (id, estado) => {
+    const res = await api('updateDelivery', { id, estado })
+    if (res.success) viewDelivery(el) else toast(res.message, 'err')
+  }
+}
+
+// ─── PRODUCTOS ────────────────────────────────────────────────
+async function viewProductos(el) {
+  el.innerHTML = '<p class="text-gray-400 text-sm">Cargando…</p>'
+  const [prodsRes, catsRes] = await Promise.all([api('getProducts',{includeInactive:true}), api('getCategories')])
+  const prods = prodsRes.data || []
+  const cats = catsRes.data || []
+  el.innerHTML = `
+    <div class="flex items-center justify-between mb-4">
+      <h1 class="text-2xl font-black">Productos</h1>
+      <button onclick="openProductForm(null)" class="btn-primary">+ Nuevo</button>
+    </div>
+    <div class="card overflow-hidden">
+      <table class="w-full text-sm">
+        <thead class="bg-gray-50 border-b border-gray-100">
+          <tr><th class="px-4 py-3 text-left font-semibold text-gray-600">Producto</th><th class="px-4 py-3 text-right font-semibold text-gray-600">Precio</th><th class="px-4 py-3 text-right font-semibold text-gray-600">Stock</th><th class="px-4 py-3 text-center font-semibold text-gray-600">Estado</th><th class="px-4 py-3"></th></tr>
+        </thead>
+        <tbody>
+          ${prods.map(p => `<tr class="border-b border-gray-50 hover:bg-gray-50/50">
+            <td class="px-4 py-3">
+              <p class="font-semibold text-gray-900">${escHtml(p.nombre)}</p>
+              <p class="text-xs text-gray-400">${escHtml(cats.find(c=>c.id===p.categoriaId)?.nombre||'')}</p>
+            </td>
+            <td class="px-4 py-3 text-right font-bold text-brand-600">${fmt(p.precio)}</td>
+            <td class="px-4 py-3 text-right text-gray-700">${p.controlStock ? p.stockActual : '—'}</td>
+            <td class="px-4 py-3 text-center">${badge(p.activo?'Activo':'Inactivo', p.activo?'bg-emerald-100 text-emerald-700':'bg-red-100 text-red-700')}</td>
+            <td class="px-4 py-3 text-right">
+              <button onclick="openProductForm('${p.id}')" class="p-2 hover:bg-gray-100 rounded-lg text-gray-500 hover:text-brand-600">✏️</button>
+              <button onclick="doDeleteProduct('${p.id}')" class="p-2 hover:bg-red-50 rounded-lg text-gray-500 hover:text-red-600">🗑</button>
+            </td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+  `
+  window.openProductForm = (id) => {
+    const p = id ? prods.find(x=>x.id===id) : {}
+    openModal(`
+      <div class="modal max-w-md">
+        <div class="p-5 space-y-3">
+          <div class="flex justify-between"><h2 class="font-black text-xl">${id?'Editar':'Nuevo'} Producto</h2><button onclick="closeModal()" class="text-gray-400 text-xl">✕</button></div>
+          <div class="grid grid-cols-2 gap-3">
+            <div class="col-span-2"><label class="text-xs font-semibold text-gray-600 mb-1 block">Nombre *</label><input id="pf-nombre" class="input" value="${escHtml(p?.nombre||'')}"></div>
+            <div><label class="text-xs font-semibold text-gray-600 mb-1 block">Categoría</label><select id="pf-cat" class="input">${cats.map(c=>`<option value="${c.id}" ${p?.categoriaId===c.id?'selected':''}>${escHtml(c.nombre)}</option>`).join('')}</select></div>
+            <div><label class="text-xs font-semibold text-gray-600 mb-1 block">Precio *</label><input type="number" id="pf-precio" class="input" value="${p?.precio||0}"></div>
+            <div><label class="text-xs font-semibold text-gray-600 mb-1 block">Costo</label><input type="number" id="pf-costo" class="input" value="${p?.costo||0}"></div>
+            <div><label class="text-xs font-semibold text-gray-600 mb-1 block">Imagen URL</label><input id="pf-img" class="input" value="${escHtml(p?.imagenUrl||'')}"></div>
+            <div class="col-span-2"><label class="text-xs font-semibold text-gray-600 mb-1 block">Descripción</label><input id="pf-desc" class="input" value="${escHtml(p?.descripcion||'')}"></div>
+            <label class="flex items-center gap-2 col-span-2 cursor-pointer"><input type="checkbox" id="pf-stock" ${p?.controlStock?'checked':''}><span class="text-sm">Control de stock</span></label>
+            <div><label class="text-xs font-semibold text-gray-600 mb-1 block">Stock actual</label><input type="number" id="pf-stockact" class="input" value="${p?.stockActual||0}"></div>
+            <div><label class="text-xs font-semibold text-gray-600 mb-1 block">Stock mínimo</label><input type="number" id="pf-stockmin" class="input" value="${p?.stockMinimo||0}"></div>
+            ${id ? `<label class="flex items-center gap-2 col-span-2 cursor-pointer"><input type="checkbox" id="pf-activo" ${p?.activo?'checked':''}><span class="text-sm">Activo</span></label>` : ''}
+          </div>
+          <div class="flex gap-3 pt-2">
+            <button onclick="closeModal()" class="btn-secondary flex-1">Cancelar</button>
+            <button onclick="saveProduct('${id||''}')" class="btn-primary flex-1">Guardar</button>
+          </div>
+        </div>
+      </div>
+    `)
+  }
+  window.saveProduct = async (id) => {
+    const payload = {
+      nombre: document.getElementById('pf-nombre').value,
+      categoriaId: document.getElementById('pf-cat')?.value,
+      precio: document.getElementById('pf-precio').value,
+      costo: document.getElementById('pf-costo').value,
+      imagenUrl: document.getElementById('pf-img').value,
+      descripcion: document.getElementById('pf-desc').value,
+      controlStock: document.getElementById('pf-stock').checked,
+      stockActual: document.getElementById('pf-stockact').value,
+      stockMinimo: document.getElementById('pf-stockmin').value,
+    }
+    if (id) { payload.id = id; payload.activo = document.getElementById('pf-activo')?.checked }
+    const res = await api(id ? 'updateProduct' : 'createProduct', payload)
+    if (res.success) { toast(id?'Producto actualizado':'Producto creado'); closeModal(); viewProductos(el) } else toast(res.message, 'err')
+  }
+  window.doDeleteProduct = async (id) => {
+    if (!confirm('¿Desactivar producto?')) return
+    const res = await api('deleteProduct', { id })
+    if (res.success) { toast('Producto desactivado'); viewProductos(el) } else toast(res.message, 'err')
+  }
+}
+
+// ─── CLIENTES ─────────────────────────────────────────────────
+async function viewClientes(el) {
+  el.innerHTML = '<p class="text-gray-400 text-sm">Cargando…</p>'
+  const res = await api('getCustomers')
+  const list = res.data || []
+  el.innerHTML = `
+    <div class="flex items-center justify-between mb-4">
+      <h1 class="text-2xl font-black">Clientes</h1>
+      <button onclick="openClienteForm(null)" class="btn-primary">+ Nuevo</button>
+    </div>
+    <div class="card overflow-hidden">
+      <table class="w-full text-sm">
+        <thead class="bg-gray-50 border-b border-gray-100">
+          <tr><th class="px-4 py-3 text-left font-semibold text-gray-600">Nombre</th><th class="px-4 py-3 text-left font-semibold text-gray-600">Teléfono</th><th class="px-4 py-3 text-right font-semibold text-gray-600">Pedidos</th><th class="px-4 py-3 text-right font-semibold text-gray-600">Total</th><th class="px-4 py-3"></th></tr>
+        </thead>
+        <tbody>
+          ${list.map(c => `<tr class="border-b border-gray-50 hover:bg-gray-50/50">
+            <td class="px-4 py-3 font-semibold text-gray-900">${escHtml(c.nombre)}</td>
+            <td class="px-4 py-3"><a href="tel:${escHtml(c.telefono)}" class="text-brand-600 hover:underline">${escHtml(c.telefono)}</a></td>
+            <td class="px-4 py-3 text-right">${c.totalPedidos||0}</td>
+            <td class="px-4 py-3 text-right font-bold text-gray-900">${fmt(c.totalComprado||0)}</td>
+            <td class="px-4 py-3 text-right">
+              <button onclick="openClienteForm('${c.id}')" class="p-2 hover:bg-gray-100 rounded-lg text-gray-500 hover:text-brand-600">✏️</button>
+              <button onclick="doDeleteCliente('${c.id}')" class="p-2 hover:bg-red-50 rounded-lg text-gray-500 hover:text-red-600">🗑</button>
+            </td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+  `
+  window.openClienteForm = (id) => {
+    const c = id ? list.find(x=>x.id===id) : {}
+    openModal(`
+      <div class="modal max-w-sm">
+        <div class="p-5 space-y-3">
+          <div class="flex justify-between"><h2 class="font-black text-xl">${id?'Editar':'Nuevo'} Cliente</h2><button onclick="closeModal()" class="text-gray-400 text-xl">✕</button></div>
+          <div><label class="text-xs font-semibold text-gray-600 mb-1 block">Nombre *</label><input id="cf-nombre" class="input" value="${escHtml(c?.nombre||'')}"></div>
+          <div><label class="text-xs font-semibold text-gray-600 mb-1 block">Teléfono *</label><input id="cf-tel" class="input" value="${escHtml(c?.telefono||'')}"></div>
+          <div><label class="text-xs font-semibold text-gray-600 mb-1 block">Email</label><input type="email" id="cf-email" class="input" value="${escHtml(c?.email||'')}"></div>
+          <div><label class="text-xs font-semibold text-gray-600 mb-1 block">Dirección</label><input id="cf-dir" class="input" value="${escHtml(c?.direccion||'')}"></div>
+          <div><label class="text-xs font-semibold text-gray-600 mb-1 block">Observaciones</label><textarea id="cf-obs" class="input resize-none" rows="2">${escHtml(c?.observaciones||'')}</textarea></div>
+          <div class="flex gap-3 pt-2">
+            <button onclick="closeModal()" class="btn-secondary flex-1">Cancelar</button>
+            <button onclick="saveCliente('${id||''}')" class="btn-primary flex-1">Guardar</button>
+          </div>
+        </div>
+      </div>
+    `)
+  }
+  window.saveCliente = async (id) => {
+    const payload = { nombre: document.getElementById('cf-nombre').value, telefono: document.getElementById('cf-tel').value, email: document.getElementById('cf-email').value, direccion: document.getElementById('cf-dir').value, observaciones: document.getElementById('cf-obs').value }
+    if (id) payload.id = id
+    const res = await api(id ? 'updateCustomer' : 'createCustomer', payload)
+    if (res.success) { toast(id?'Cliente actualizado':'Cliente creado'); closeModal(); viewClientes(el) } else toast(res.message, 'err')
+  }
+  window.doDeleteCliente = async (id) => {
+    if (!confirm('¿Desactivar cliente?')) return
+    const res = await api('deleteCustomer', { id })
+    if (res.success) { toast('Cliente desactivado'); viewClientes(el) } else toast(res.message, 'err')
+  }
+}
+
+// ─── CAJA ─────────────────────────────────────────────────────
+async function viewCaja(el) {
+  el.innerHTML = '<p class="text-gray-400 text-sm">Cargando…</p>'
+  const [activa, historial] = await Promise.all([api('getCajaActiva'), api('getCajas',{limit:10})])
+  const caja = activa.data
+  el.innerHTML = `
+    <h1 class="text-2xl font-black mb-4">Caja</h1>
+    ${caja ? `
+    <div class="card p-5 mb-4 border-l-4 border-emerald-500">
+      <div class="flex justify-between items-start flex-wrap gap-3">
+        <div>
+          <p class="text-sm text-gray-500">Caja abierta desde ${fmtDT(caja.fechaApertura)}</p>
+          <p class="text-3xl font-black text-gray-900 mt-1">${fmt(caja.totalVentas)}</p>
+          <p class="text-sm text-gray-500">en ventas</p>
+        </div>
+        <div class="grid grid-cols-2 gap-x-6 gap-y-1 text-sm">
+          <span class="text-gray-500">Efectivo:</span><span class="font-semibold text-right">${fmt(caja.totalEfectivo)}</span>
+          <span class="text-gray-500">Tarjeta:</span><span class="font-semibold text-right">${fmt(caja.totalTarjeta)}</span>
+          <span class="text-gray-500">Transferencia:</span><span class="font-semibold text-right">${fmt(caja.totalTransferencia)}</span>
+          <span class="text-gray-500">Mercado Pago:</span><span class="font-semibold text-right">${fmt(caja.totalMp)}</span>
+          <span class="text-gray-500">Gastos:</span><span class="font-semibold text-right text-red-600">-${fmt(caja.totalGastos)}</span>
+        </div>
+      </div>
+      <button onclick="openCloseCajaModal('${caja.id}')" class="mt-4 py-2.5 px-5 bg-red-500 text-white font-bold rounded-xl hover:bg-red-600 text-sm">Cerrar caja</button>
+    </div>
+    ` : `
+    <div class="card p-5 mb-4 border-l-4 border-gray-300">
+      <p class="text-gray-500 mb-3">No hay caja abierta</p>
+      <button onclick="openOpenCajaModal()" class="py-2.5 px-5 bg-emerald-500 text-white font-bold rounded-xl hover:bg-emerald-600 text-sm">Abrir caja</button>
+    </div>
+    `}
+    <h2 class="font-bold text-gray-700 mb-3">Historial</h2>
+    <div class="card overflow-hidden">
+      <table class="w-full text-sm">
+        <thead class="bg-gray-50 border-b"><tr><th class="px-4 py-3 text-left font-semibold text-gray-600">Apertura</th><th class="px-4 py-3 text-right font-semibold text-gray-600">Ventas</th><th class="px-4 py-3 text-right font-semibold text-gray-600">Diferencia</th><th class="px-4 py-3 text-center font-semibold text-gray-600">Estado</th></tr></thead>
+        <tbody>
+          ${(historial.data||[]).map(c => `<tr class="border-b border-gray-50">
+            <td class="px-4 py-3">${fmtDT(c.fechaApertura)}</td>
+            <td class="px-4 py-3 text-right font-semibold">${fmt(c.totalVentas)}</td>
+            <td class="px-4 py-3 text-right ${parseFloat(c.diferencia)>=0?'text-emerald-600':'text-red-600'} font-semibold">${fmt(c.diferencia)}</td>
+            <td class="px-4 py-3 text-center">${badge(c.estado, c.estado==='ABIERTA'?'bg-emerald-100 text-emerald-700':'bg-gray-100 text-gray-600')}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+  `
+  window.openOpenCajaModal = () => {
+    openModal(`<div class="modal max-w-sm"><div class="p-5 space-y-4">
+      <div class="flex justify-between"><h2 class="font-black text-xl">Abrir caja</h2><button onclick="closeModal()" class="text-gray-400 text-xl">✕</button></div>
+      <div><label class="text-xs font-semibold text-gray-600 mb-1 block">Monto inicial</label><input type="number" id="caja-inicial" class="input" value="0" placeholder="0.00"></div>
+      <button onclick="doOpenCaja()" class="w-full py-3 bg-emerald-500 text-white font-black rounded-xl hover:bg-emerald-600">Abrir caja</button>
+    </div></div>`)
+    window.doOpenCaja = async () => {
+      const res = await api('openCaja', { montoInicial: document.getElementById('caja-inicial').value })
+      if (res.success) { toast('Caja abierta'); closeModal(); viewCaja(el) } else toast(res.message, 'err')
+    }
+  }
+  window.openCloseCajaModal = (id) => {
+    openModal(`<div class="modal max-w-sm"><div class="p-5 space-y-4">
+      <div class="flex justify-between"><h2 class="font-black text-xl">Cerrar caja</h2><button onclick="closeModal()" class="text-gray-400 text-xl">✕</button></div>
+      <div><label class="text-xs font-semibold text-gray-600 mb-1 block">Efectivo declarado</label><input type="number" id="caja-decl" class="input" value="0"></div>
+      <div><label class="text-xs font-semibold text-gray-600 mb-1 block">Observaciones</label><textarea id="caja-obs" class="input resize-none" rows="2"></textarea></div>
+      <button onclick="doCloseCaja()" class="w-full py-3 bg-red-500 text-white font-black rounded-xl hover:bg-red-600">Cerrar caja</button>
+    </div></div>`)
+    window.doCloseCaja = async () => {
+      const res = await api('closeCaja', { efectivoDeclarado: document.getElementById('caja-decl').value, observaciones: document.getElementById('caja-obs').value })
+      if (res.success) { toast('Caja cerrada. Diferencia: ' + fmt(res.data.diferencia)); closeModal(); viewCaja(el) } else toast(res.message, 'err')
+    }
+  }
+}
+
+// ─── GASTOS ───────────────────────────────────────────────────
+async function viewGastos(el) {
+  el.innerHTML = '<p class="text-gray-400 text-sm">Cargando…</p>'
+  const res = await api('getExpenses')
+  const list = res.data || []
+  const total = list.reduce((s,g) => s + (parseFloat(g.importe)||0), 0)
+  el.innerHTML = `
+    <div class="flex items-center justify-between mb-4">
+      <div><h1 class="text-2xl font-black">Gastos</h1><p class="text-gray-500 text-sm">Total: ${fmt(total)}</p></div>
+      <button onclick="openGastoForm(null)" class="btn-primary">+ Nuevo</button>
+    </div>
+    <div class="card overflow-hidden">
+      <table class="w-full text-sm">
+        <thead class="bg-gray-50 border-b"><tr><th class="px-4 py-3 text-left font-semibold text-gray-600">Fecha</th><th class="px-4 py-3 text-left font-semibold text-gray-600">Concepto</th><th class="px-4 py-3 text-left font-semibold text-gray-600">Método</th><th class="px-4 py-3 text-right font-semibold text-gray-600">Importe</th><th class="px-4 py-3"></th></tr></thead>
+        <tbody>
+          ${list.map(g => `<tr class="border-b border-gray-50 hover:bg-gray-50/50">
+            <td class="px-4 py-3 text-gray-500">${fmtDate(g.fecha)}</td>
+            <td class="px-4 py-3"><p class="font-semibold">${escHtml(g.concepto)}</p><p class="text-xs text-gray-400">${escHtml(g.categoria)}</p></td>
+            <td class="px-4 py-3 text-gray-600">${g.metodoPago}</td>
+            <td class="px-4 py-3 text-right font-bold text-red-600">${fmt(g.importe)}</td>
+            <td class="px-4 py-3 text-right">
+              <button onclick="doDeleteGasto('${g.id}')" class="p-2 hover:bg-red-50 rounded-lg text-gray-500 hover:text-red-600">🗑</button>
+            </td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+  `
+  window.openGastoForm = (id) => {
+    openModal(`<div class="modal max-w-sm"><div class="p-5 space-y-3">
+      <div class="flex justify-between"><h2 class="font-black text-xl">Nuevo Gasto</h2><button onclick="closeModal()" class="text-gray-400 text-xl">✕</button></div>
+      <div><label class="text-xs font-semibold text-gray-600 mb-1 block">Concepto *</label><input id="gf-concepto" class="input"></div>
+      <div><label class="text-xs font-semibold text-gray-600 mb-1 block">Categoría</label><input id="gf-cat" class="input" value="General"></div>
+      <div><label class="text-xs font-semibold text-gray-600 mb-1 block">Importe *</label><input type="number" id="gf-importe" class="input" value="0"></div>
+      <div><label class="text-xs font-semibold text-gray-600 mb-1 block">Método</label><select id="gf-metodo" class="input"><option>EFECTIVO</option><option>TARJETA</option><option>TRANSFERENCIA</option></select></div>
+      <div class="flex gap-3 pt-2"><button onclick="closeModal()" class="btn-secondary flex-1">Cancelar</button><button onclick="saveGasto()" class="btn-primary flex-1">Guardar</button></div>
+    </div></div>`)
+    window.saveGasto = async () => {
+      const res = await api('createExpense', { concepto: document.getElementById('gf-concepto').value, categoria: document.getElementById('gf-cat').value, importe: document.getElementById('gf-importe').value, metodoPago: document.getElementById('gf-metodo').value })
+      if (res.success) { toast('Gasto registrado'); closeModal(); viewGastos(el) } else toast(res.message, 'err')
+    }
+  }
+  window.doDeleteGasto = async (id) => {
+    if (!confirm('¿Eliminar gasto?')) return
+    const res = await api('deleteExpense', { id })
+    if (res.success) { toast('Gasto eliminado'); viewGastos(el) } else toast(res.message, 'err')
+  }
+}
+
+// ─── PROMOCIONES ──────────────────────────────────────────────
+async function viewPromociones(el) {
+  el.innerHTML = '<p class="text-gray-400 text-sm">Cargando…</p>'
+  const res = await api('getPromotions', { all: true })
+  const list = res.data || []
+  el.innerHTML = `
+    <div class="flex items-center justify-between mb-4">
+      <h1 class="text-2xl font-black">Promociones</h1>
+      <button onclick="openPromoForm(null)" class="btn-primary">+ Nueva</button>
+    </div>
+    <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+      ${list.map(p => `
+        <div class="card p-4 ${p.activa?'border-l-4 border-brand-500':'opacity-60'}">
+          <div class="flex justify-between items-start mb-2">
+            <div><p class="font-bold text-gray-900">${escHtml(p.nombre)}</p><p class="text-xs text-gray-500">${p.tipo}</p></div>
+            ${badge(p.activa?'Activa':'Inactiva', p.activa?'bg-emerald-100 text-emerald-700':'bg-gray-100 text-gray-600')}
+          </div>
+          <p class="text-2xl font-black text-brand-600">${p.tipo==='PORCENTAJE'?p.valor+'%':fmt(p.valor)}</p>
+          ${p.fechaDesde ? `<p class="text-xs text-gray-400 mt-1">${fmtDate(p.fechaDesde)} → ${fmtDate(p.fechaHasta)}</p>` : ''}
+          <div class="flex gap-2 mt-3">
+            <button onclick="togglePromo('${p.id}',${!p.activa})" class="text-xs ${p.activa?'text-red-600 hover:bg-red-50':'text-emerald-600 hover:bg-emerald-50'} px-2 py-1 rounded-lg">${p.activa?'Desactivar':'Activar'}</button>
+            <button onclick="doDeletePromo('${p.id}')" class="text-xs text-gray-500 hover:text-red-600 px-2 py-1 rounded-lg">Eliminar</button>
+          </div>
+        </div>`).join('')}
+    </div>
+  `
+  window.openPromoForm = () => {
+    openModal(`<div class="modal max-w-sm"><div class="p-5 space-y-3">
+      <div class="flex justify-between"><h2 class="font-black text-xl">Nueva Promoción</h2><button onclick="closeModal()" class="text-gray-400 text-xl">✕</button></div>
+      <div><label class="text-xs font-semibold text-gray-600 mb-1 block">Nombre *</label><input id="prf-nombre" class="input"></div>
+      <div><label class="text-xs font-semibold text-gray-600 mb-1 block">Tipo</label><select id="prf-tipo" class="input"><option value="PORCENTAJE">Porcentaje</option><option value="MONTO_FIJO">Monto fijo</option><option value="2X1">2x1</option></select></div>
+      <div><label class="text-xs font-semibold text-gray-600 mb-1 block">Valor</label><input type="number" id="prf-valor" class="input" value="10"></div>
+      <div class="grid grid-cols-2 gap-3">
+        <div><label class="text-xs font-semibold text-gray-600 mb-1 block">Desde</label><input type="date" id="prf-desde" class="input"></div>
+        <div><label class="text-xs font-semibold text-gray-600 mb-1 block">Hasta</label><input type="date" id="prf-hasta" class="input"></div>
+      </div>
+      <div class="flex gap-3 pt-2"><button onclick="closeModal()" class="btn-secondary flex-1">Cancelar</button><button onclick="savePromo()" class="btn-primary flex-1">Guardar</button></div>
+    </div></div>`)
+    window.savePromo = async () => {
+      const res = await api('createPromotion', { nombre: document.getElementById('prf-nombre').value, tipo: document.getElementById('prf-tipo').value, valor: document.getElementById('prf-valor').value, fechaDesde: document.getElementById('prf-desde').value, fechaHasta: document.getElementById('prf-hasta').value })
+      if (res.success) { toast('Promoción creada'); closeModal(); viewPromociones(el) } else toast(res.message, 'err')
+    }
+  }
+  window.togglePromo = async (id, activa) => {
+    const res = await api('updatePromotion', { id, activa })
+    if (res.success) viewPromociones(el) else toast(res.message, 'err')
+  }
+  window.doDeletePromo = async (id) => {
+    if (!confirm('¿Desactivar promoción?')) return
+    const res = await api('deletePromotion', { id })
+    if (res.success) { toast('Promoción desactivada'); viewPromociones(el) } else toast(res.message, 'err')
+  }
+}
+
+// ─── REPORTES ─────────────────────────────────────────────────
+async function viewReportes(el) {
+  const today = new Date().toISOString().split('T')[0]
+  const weekAgo = new Date(Date.now()-7*86400000).toISOString().split('T')[0]
+  let desde = weekAgo, hasta = today
+  const load = async () => {
+    el.innerHTML = '<p class="text-gray-400 text-sm">Cargando…</p>'
+    const res = await api('getReports', { desde, hasta })
+    if (!res.success) { el.innerHTML = `<p class="text-red-500">${res.message}</p>`; return }
+    const d = res.data, r = d.resumen || {}
+    el.innerHTML = `
+      <h1 class="text-2xl font-black mb-4">Reportes</h1>
+      <div class="card p-4 mb-4 flex items-center gap-4 flex-wrap">
+        <div><label class="text-xs text-gray-500">Desde</label><input type="date" id="rep-desde" value="${desde}" class="input mt-1 w-40"></div>
+        <div><label class="text-xs text-gray-500">Hasta</label><input type="date" id="rep-hasta" value="${hasta}" class="input mt-1 w-40"></div>
+        <button onclick="applyRange()" class="btn-primary mt-5">Aplicar</button>
+      </div>
+      <div class="grid grid-cols-2 lg:grid-cols-5 gap-4 mb-4">
+        ${kpiCard('Ventas', fmt(r.totalVentas||0), '💰', 'text-brand-600')}
+        ${kpiCard('Pedidos', r.totalPedidos||0, '📋', 'text-blue-600')}
+        ${kpiCard('Ticket prom.', fmt(r.ticketPromedio||0), '🧾', 'text-purple-600')}
+        ${kpiCard('Gastos', fmt(r.totalGastos||0), '💸', 'text-red-600')}
+        ${kpiCard('Neto', fmt(r.neto||0), '✅', 'text-emerald-600')}
+      </div>
+      <div class="grid lg:grid-cols-2 gap-4">
+        <div class="card p-5">
+          <h2 class="font-bold text-sm text-gray-700 mb-4">Top productos</h2>
+          <div class="space-y-2">
+            ${(d.topProducts||[]).map((p,i) => `<div class="flex justify-between text-sm"><span>${i+1}. ${escHtml(p.nombre)}</span><span class="font-bold bg-gray-100 px-2 py-0.5 rounded-lg text-xs">${p.cantidad} uds</span></div>`).join('')||'<p class="text-gray-400 text-sm">Sin datos</p>'}
+          </div>
+        </div>
+        <div class="card p-5">
+          <h2 class="font-bold text-sm text-gray-700 mb-4">Por método de pago</h2>
+          <div class="space-y-2">
+            ${(d.paymentMethods||[]).map(p => `<div class="flex justify-between text-sm"><span class="text-gray-600">${p.metodo}</span><span class="font-bold text-gray-900">${fmt(p.total)}</span></div>`).join('')||'<p class="text-gray-400 text-sm">Sin datos</p>'}
+          </div>
+        </div>
+      </div>
+    `
+    window.applyRange = () => {
+      desde = document.getElementById('rep-desde').value
+      hasta = document.getElementById('rep-hasta').value
+      load()
+    }
+  }
+  await load()
+}
+
+// ─── USUARIOS ─────────────────────────────────────────────────
+async function viewUsuarios(el) {
+  el.innerHTML = '<p class="text-gray-400 text-sm">Cargando…</p>'
+  const res = await api('getUsers')
+  const list = res.data || []
+  const ROLE_COLORS = { ADMIN:'bg-red-100 text-red-700', ENCARGADO:'bg-orange-100 text-orange-700', CAJERO:'bg-blue-100 text-blue-700', MOZO:'bg-green-100 text-green-700', COCINA:'bg-yellow-100 text-yellow-700', DELIVERY:'bg-purple-100 text-purple-700' }
+  el.innerHTML = `
+    <div class="flex items-center justify-between mb-4">
+      <h1 class="text-2xl font-black">Usuarios</h1>
+      <button onclick="openUsuarioForm(null)" class="btn-primary">+ Nuevo</button>
+    </div>
+    <div class="card overflow-hidden">
+      <table class="w-full text-sm">
+        <thead class="bg-gray-50 border-b"><tr><th class="px-4 py-3 text-left font-semibold text-gray-600">Usuario</th><th class="px-4 py-3 text-left font-semibold text-gray-600">Rol</th><th class="px-4 py-3 text-left font-semibold text-gray-600">Último acceso</th><th class="px-4 py-3 text-center font-semibold text-gray-600">Estado</th><th class="px-4 py-3"></th></tr></thead>
+        <tbody>
+          ${list.map(u => `<tr class="border-b border-gray-50 hover:bg-gray-50/50">
+            <td class="px-4 py-3">
+              <div class="flex items-center gap-3">
+                <div class="w-8 h-8 rounded-full bg-brand-100 flex items-center justify-center font-black text-brand-700">${(u.nombre||'?')[0].toUpperCase()}</div>
+                <div><p class="font-semibold">${escHtml(u.nombre)}</p><p class="text-xs text-gray-400">${escHtml(u.email)}</p></div>
+              </div>
+            </td>
+            <td class="px-4 py-3">${badge(u.rol||'', ROLE_COLORS[u.rol]||'bg-gray-100 text-gray-700')}</td>
+            <td class="px-4 py-3 text-gray-400 text-xs">${fmtDT(u.ultimoLogin)}</td>
+            <td class="px-4 py-3 text-center">${badge(u.activo?'Activo':'Inactivo', u.activo?'bg-emerald-100 text-emerald-700':'bg-red-100 text-red-700')}</td>
+            <td class="px-4 py-3 text-right">
+              <button onclick="openUsuarioForm('${u.id}')" class="p-2 hover:bg-gray-100 rounded-lg text-gray-500 hover:text-brand-600">✏️</button>
+              <button onclick="doDeleteUsuario('${u.id}')" class="p-2 hover:bg-red-50 rounded-lg text-gray-500 hover:text-red-600">🗑</button>
+            </td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+  `
+  window.openUsuarioForm = (id) => {
+    const u = id ? list.find(x=>x.id===id) : {}
+    openModal(`<div class="modal max-w-sm"><div class="p-5 space-y-3">
+      <div class="flex justify-between"><h2 class="font-black text-xl">${id?'Editar':'Nuevo'} Usuario</h2><button onclick="closeModal()" class="text-gray-400 text-xl">✕</button></div>
+      <div><label class="text-xs font-semibold text-gray-600 mb-1 block">Nombre *</label><input id="uf-nombre" class="input" value="${escHtml(u?.nombre||'')}"></div>
+      <div><label class="text-xs font-semibold text-gray-600 mb-1 block">Email *</label><input type="email" id="uf-email" class="input" value="${escHtml(u?.email||'')}"></div>
+      <div><label class="text-xs font-semibold text-gray-600 mb-1 block">${id?'Nueva contraseña (dejar vacío para mantener)':'Contraseña *'}</label><input type="password" id="uf-pass" class="input"></div>
+      <div><label class="text-xs font-semibold text-gray-600 mb-1 block">Rol</label><select id="uf-rol" class="input">${['ADMIN','ENCARGADO','CAJERO','MOZO','COCINA','DELIVERY'].map(r=>`<option value="${r}" ${u?.rol===r?'selected':''}>${r}</option>`).join('')}</select></div>
+      ${id ? `<label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" id="uf-activo" ${u?.activo?'checked':''}><span class="text-sm">Activo</span></label>` : ''}
+      <div class="flex gap-3 pt-2"><button onclick="closeModal()" class="btn-secondary flex-1">Cancelar</button><button onclick="saveUsuario('${id||''}')" class="btn-primary flex-1">Guardar</button></div>
+    </div></div>`)
+    window.saveUsuario = async (id) => {
+      const payload = { nombre: document.getElementById('uf-nombre').value, email: document.getElementById('uf-email').value, rol: document.getElementById('uf-rol').value }
+      const pass = document.getElementById('uf-pass').value
+      if (pass) payload.password = pass
+      if (id) { payload.id = id; payload.activo = document.getElementById('uf-activo')?.checked }
+      const res = await api(id?'updateUser':'createUser', payload)
+      if (res.success) { toast(id?'Usuario actualizado':'Usuario creado'); closeModal(); viewUsuarios(el) } else toast(res.message, 'err')
+    }
+  }
+  window.doDeleteUsuario = async (id) => {
+    if (!confirm('¿Desactivar usuario?')) return
+    const res = await api('deleteUser', { id })
+    if (res.success) { toast('Usuario desactivado'); viewUsuarios(el) } else toast(res.message, 'err')
+  }
+}
+
+// ─── CONFIGURACIÓN ────────────────────────────────────────────
+async function viewConfiguracion(el) {
+  el.innerHTML = '<p class="text-gray-400 text-sm">Cargando…</p>'
+  const res = await api('getConfig')
+  const cfg = res.data || {}
+  el.innerHTML = `
+    <div class="flex items-center justify-between mb-4">
+      <h1 class="text-2xl font-black">Configuración</h1>
+      <button onclick="saveConfig()" class="btn-primary">💾 Guardar</button>
+    </div>
+    <div class="max-w-2xl space-y-4">
+      <div class="card p-5 space-y-3">
+        <h2 class="font-bold text-gray-700 border-b pb-2 text-sm">Negocio</h2>
+        ${cfgField('NOMBRE_NEGOCIO','Nombre del negocio',cfg.NOMBRE_NEGOCIO||'')}
+        ${cfgField('DIRECCION','Dirección',cfg.DIRECCION||'')}
+        ${cfgField('TELEFONO','Teléfono',cfg.TELEFONO||'')}
+        ${cfgField('WHATSAPP','WhatsApp',cfg.WHATSAPP||'')}
+        ${cfgField('EMAIL','Email',cfg.EMAIL||'')}
+      </div>
+      <div class="card p-5 space-y-3">
+        <h2 class="font-bold text-gray-700 border-b pb-2 text-sm">Moneda y precios</h2>
+        <div class="grid sm:grid-cols-3 gap-2 items-center">
+          <label class="text-sm font-medium text-gray-700">Moneda</label>
+          <select id="cfg-MONEDA" class="input sm:col-span-2">
+            ${[['ARS','Peso argentino'],['MXN','Peso mexicano'],['COP','Peso colombiano'],['USD','Dólar'],['EUR','Euro']].map(([code,label])=>`<option value="${code}" ${cfg.MONEDA===code?'selected':''}>${label} (${code})</option>`).join('')}
+          </select>
+        </div>
+        ${cfgField('SIMBOLO_MONEDA','Símbolo',cfg.SIMBOLO_MONEDA||'$')}
+        ${cfgField('IMPUESTO','Impuesto (%)',cfg.IMPUESTO||'0','number')}
+        ${cfgField('COSTO_DELIVERY','Costo delivery',cfg.COSTO_DELIVERY||'0','number')}
+        ${cfgField('PEDIDO_MINIMO','Pedido mínimo',cfg.PEDIDO_MINIMO||'0','number')}
+      </div>
+      <div class="card p-5 space-y-3">
+        <h2 class="font-bold text-gray-700 border-b pb-2 text-sm">Horarios y menú</h2>
+        ${cfgField('HORARIO_APERTURA','Apertura',cfg.HORARIO_APERTURA||'09:00','time')}
+        ${cfgField('HORARIO_CIERRE','Cierre',cfg.HORARIO_CIERRE||'23:00','time')}
+        <div class="grid sm:grid-cols-3 gap-2 items-center">
+          <label class="text-sm font-medium text-gray-700">Aceptar pedidos</label>
+          <select id="cfg-NEGOCIO_ACTIVO" class="input sm:col-span-2">
+            <option value="1" ${cfg.NEGOCIO_ACTIVO==='1'?'selected':''}>Sí, activo</option>
+            <option value="0" ${cfg.NEGOCIO_ACTIVO==='0'?'selected':''}>No, cerrado</option>
+          </select>
+        </div>
+        ${cfgField('BIENVENIDA','Mensaje bienvenida',cfg.BIENVENIDA||'')}
+        ${cfgField('MENSAJE_TICKET','Mensaje ticket',cfg.MENSAJE_TICKET||'')}
+        ${cfgField('FOOTER_TEXTO','Texto footer',cfg.FOOTER_TEXTO||'')}
+      </div>
+    </div>
+  `
+  window.saveConfig = async () => {
+    const keys = ['NOMBRE_NEGOCIO','DIRECCION','TELEFONO','WHATSAPP','EMAIL','MONEDA','SIMBOLO_MONEDA','IMPUESTO','COSTO_DELIVERY','PEDIDO_MINIMO','HORARIO_APERTURA','HORARIO_CIERRE','NEGOCIO_ACTIVO','BIENVENIDA','MENSAJE_TICKET','FOOTER_TEXTO']
+    const config = {}
+    keys.forEach(k => { const el = document.getElementById('cfg-'+k); if (el) config[k] = el.value })
+    const res = await api('updateConfig', { config })
+    if (res.success) {
+      toast('Configuración guardada')
+      localStorage.setItem('rp_config', JSON.stringify({ symbol: config.SIMBOLO_MONEDA||'$', costoDelivery: parseFloat(config.COSTO_DELIVERY)||0 }))
+      state.config = { symbol: config.SIMBOLO_MONEDA||'$', costoDelivery: parseFloat(config.COSTO_DELIVERY)||0 }
+    } else toast(res.message, 'err')
+  }
+}
+
+function cfgField(key, label, value, type='text') {
+  return `<div class="grid sm:grid-cols-3 gap-2 items-center"><label class="text-sm font-medium text-gray-700">${label}</label><input type="${type}" id="cfg-${key}" class="input sm:col-span-2" value="${escHtml(String(value))}"></div>`
+}
+
+// ─── MENÚ PÚBLICO ─────────────────────────────────────────────
+async function renderMenu() {
+  const app = document.getElementById('app')
+  app.innerHTML = '<div class="min-h-screen flex items-center justify-center"><div class="animate-spin w-8 h-8 border-4 border-brand-500 border-t-transparent rounded-full"></div></div>'
+  const sp = new URLSearchParams(location.search)
+  const mesaId = sp.get('mesa') || ''
+  const [cfgRes, catsRes, prodsRes] = await Promise.all([
+    fetch(`${API_URL}?action=getPublicConfig`).then(r=>r.json()),
+    fetch(`${API_URL}?action=getPublicCategories`).then(r=>r.json()),
+    fetch(`${API_URL}?action=getPublicProducts`).then(r=>r.json()),
+  ])
+  const cfg = cfgRes.data || {}
+  const cats = catsRes.data || []
+  const prods = (prodsRes.data || []).filter(p => p.activo)
+  const sym = cfg.simboloMoneda || '$'
+  let cart = [], activeCat = 'all', step = 'menu'
+  let form = { nombre:'', telefono:'', direccion:'', referencia:'', notas:'', tipo: mesaId?'MESA':'DELIVERY' }
+
+  const fmtP = n => sym + ' ' + (parseFloat(n)||0).toLocaleString('es-AR',{minimumFractionDigits:2,maximumFractionDigits:2})
+
+  const renderMenu = () => {
+    const filtered = prods.filter(p => activeCat==='all' || p.categoriaId===activeCat)
+    const subtotal = cart.reduce((s,i) => s+i.precio*i.cantidad,0)
+    app.innerHTML = `
+      <div class="min-h-screen bg-gray-50">
+        <div class="bg-white border-b sticky top-0 z-10">
+          <div class="max-w-2xl mx-auto px-4 py-4 space-y-3">
+            <div class="flex items-center justify-between">
+              <div><h1 class="text-xl font-black text-gray-900">${escHtml(cfg.nombreNegocio||'Menú')}</h1>${cfg.mensajeBienvenida?`<p class="text-xs text-gray-500">${escHtml(cfg.mensajeBienvenida)}</p>`:''}</div>
+              ${cart.length>0?`<button onclick="goToForm()" class="relative flex items-center gap-2 px-4 py-2.5 bg-brand-500 text-white rounded-xl text-sm font-bold">${fmtP(subtotal)}<span class="absolute -top-1.5 -right-1.5 w-5 h-5 bg-red-500 text-white text-xs font-black rounded-full flex items-center justify-center">${cart.reduce((s,i)=>s+i.cantidad,0)}</span></button>`:''}
+            </div>
+            <div class="flex gap-2 overflow-x-auto pb-0.5">
+              <button onclick="setMenuCat('all')" class="px-3 py-1.5 rounded-full text-xs font-semibold flex-shrink-0 ${activeCat==='all'?'bg-brand-500 text-white':'bg-gray-100 text-gray-600'}">Todo</button>
+              ${cats.map(c=>`<button onclick="setMenuCat('${c.id}')" class="px-3 py-1.5 rounded-full text-xs font-semibold flex-shrink-0 ${activeCat===c.id?'bg-brand-500 text-white':'bg-gray-100 text-gray-600'}">${c.icono} ${escHtml(c.nombre)}</button>`).join('')}
+            </div>
+          </div>
+        </div>
+        <div class="max-w-2xl mx-auto px-4 py-4">
+          <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
+            ${filtered.map(p => {
+              const ci = cart.findIndex(i=>i.id===p.id)
+              const ci_item = cart[ci]
+              return `<div class="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
+                ${p.imagenUrl?`<img src="${escHtml(p.imagenUrl)}" class="w-full aspect-video object-cover">`:''}
+                <div class="p-3 space-y-2">
+                  <p class="font-bold text-gray-900 text-sm">${escHtml(p.nombre)}</p>
+                  ${p.descripcion?`<p class="text-xs text-gray-500">${escHtml(p.descripcion)}</p>`:''}
+                  <div class="flex items-center justify-between gap-2">
+                    <span class="font-black text-brand-600 text-sm">${fmtP(p.precio)}</span>
+                    ${ci>=0?`<div class="flex items-center gap-1">
+                      <button onclick="menuQty(${ci},-1)" class="w-7 h-7 bg-gray-100 rounded-lg flex items-center justify-center text-sm">−</button>
+                      <span class="font-bold w-5 text-center text-sm">${ci_item.cantidad}</span>
+                      <button onclick="menuQty(${ci},1)" class="w-7 h-7 bg-brand-500 rounded-lg flex items-center justify-center text-white text-sm">+</button>
+                    </div>`:`<button onclick="menuAdd('${p.id}','${escHtml(p.nombre)}',${p.precio})" class="w-8 h-8 bg-brand-500 rounded-xl flex items-center justify-center text-white">+</button>`}
+                  </div>
+                </div>
+              </div>`}).join('')}
+          </div>
+          ${filtered.length===0?'<p class="text-center text-gray-400 py-12">No hay productos</p>':''}
+        </div>
+        ${cart.length>0?`<div class="fixed bottom-0 inset-x-0 p-4 bg-white border-t shadow-lg">
+          <div class="max-w-2xl mx-auto">
+            <button onclick="goToForm()" class="w-full py-4 bg-brand-500 text-white font-black rounded-xl flex justify-between px-5">
+              <span class="bg-brand-600 rounded-lg px-2 py-1 text-sm">${cart.reduce((s,i)=>s+i.cantidad,0)}</span>
+              <span>Ver pedido</span>
+              <span>${fmtP(subtotal)}</span>
+            </button>
+          </div>
+        </div>`:''}`
+    window.setMenuCat = c => { activeCat=c; renderMenu() }
+    window.menuAdd = (id,nombre,precio) => { const i=cart.findIndex(x=>x.id===id); if(i>=0) cart[i].cantidad++; else cart.push({id,nombre,precio,cantidad:1}); renderMenu() }
+    window.menuQty = (i,d) => { cart[i].cantidad+=d; if(cart[i].cantidad<=0) cart.splice(i,1); renderMenu() }
+    window.goToForm = () => renderForm()
+  }
+
+  const renderForm = () => {
+    const subtotal = cart.reduce((s,i)=>s+i.precio*i.cantidad,0)
+    const del = form.tipo==='DELIVERY'?(parseFloat(cfg.costoDelivery)||0):0
+    const total = subtotal+del
+    app.innerHTML = `
+      <div class="min-h-screen bg-gray-50 py-6 px-4">
+        <div class="max-w-sm mx-auto space-y-4">
+          <button onclick="renderMenuAgain()" class="text-sm text-brand-600 font-medium">← Volver</button>
+          <h1 class="text-xl font-black">Datos del pedido</h1>
+          <div class="bg-white rounded-2xl p-4 space-y-2 border border-gray-100">
+            ${cart.map(i=>`<div class="flex justify-between text-sm"><span><span class="font-bold">${i.cantidad}x</span> ${escHtml(i.nombre)}</span><span class="font-semibold">${fmtP(i.precio*i.cantidad)}</span></div>`).join('')}
+            ${del>0?`<div class="flex justify-between text-sm text-gray-500 border-t pt-2"><span>Delivery</span><span>${fmtP(del)}</span></div>`:''}
+            <div class="flex justify-between font-black text-base border-t pt-2"><span>Total</span><span class="text-brand-600">${fmtP(total)}</span></div>
+          </div>
+          <div class="bg-white rounded-2xl p-4 space-y-3 border border-gray-100">
+            ${!mesaId?`<div><label class="text-xs font-semibold text-gray-600 mb-1 block">Tipo</label><select id="menu-tipo" class="input"><option value="DELIVERY">Delivery</option><option value="TAKE_AWAY">Retiro en local</option></select></div>`:''}
+            <div><label class="text-xs font-semibold text-gray-600 mb-1 block">Nombre *</label><input id="menu-nombre" value="${escHtml(form.nombre)}" class="input"></div>
+            <div><label class="text-xs font-semibold text-gray-600 mb-1 block">Teléfono *</label><input type="tel" id="menu-tel" value="${escHtml(form.telefono)}" class="input"></div>
+            <div id="delivery-fields" ${form.tipo!=='DELIVERY'?'style="display:none"':''}>
+              <div class="mb-3"><label class="text-xs font-semibold text-gray-600 mb-1 block">Dirección *</label><input id="menu-dir" value="${escHtml(form.direccion)}" class="input"></div>
+              <div><label class="text-xs font-semibold text-gray-600 mb-1 block">Referencia</label><input id="menu-ref" value="${escHtml(form.referencia)}" placeholder="Portón azul, 2do piso…" class="input"></div>
+            </div>
+            <div><label class="text-xs font-semibold text-gray-600 mb-1 block">Notas</label><textarea id="menu-notas" class="input resize-none" rows="2">${escHtml(form.notas)}</textarea></div>
+          </div>
+          <button onclick="submitMenuOrder()" class="w-full py-4 bg-brand-500 text-white font-black rounded-xl flex items-center justify-center gap-2 hover:bg-brand-600">
+            📤 Confirmar — ${fmtP(total)}
+          </button>
+        </div>
+      </div>
+    `
+    document.getElementById('menu-tipo')?.addEventListener('change', function() {
+      form.tipo = this.value
+      document.getElementById('delivery-fields').style.display = this.value==='DELIVERY'?'':'none'
+    })
+    window.renderMenuAgain = () => renderMenu()
+    window.submitMenuOrder = async () => {
+      form.nombre = document.getElementById('menu-nombre').value
+      form.telefono = document.getElementById('menu-tel').value
+      form.direccion = document.getElementById('menu-dir')?.value || ''
+      form.referencia = document.getElementById('menu-ref')?.value || ''
+      form.notas = document.getElementById('menu-notas').value
+      form.tipo = document.getElementById('menu-tipo')?.value || form.tipo
+      if (!form.nombre || !form.telefono) { alert('Nombre y teléfono requeridos'); return }
+      if (form.tipo==='DELIVERY' && !form.direccion) { alert('Dirección requerida'); return }
+      const items = cart.map(i=>({ productoId:i.id, cantidad:i.cantidad }))
+      const res = await fetch(API_URL, { method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'}, body: JSON.stringify({ action:'createWebOrder', ...form, mesaId, items }) }).then(r=>r.json())
+      if (res.success) renderSuccess(res.data.numero, res.data.id)
+      else alert(res.message||'Error al enviar')
+    }
+  }
+
+  const renderSuccess = (numero, id) => {
+    app.innerHTML = `
+      <div class="min-h-screen bg-gray-50 flex items-center justify-center p-4">
+        <div class="bg-white rounded-2xl shadow-xl p-8 max-w-sm w-full text-center space-y-4">
+          <div class="w-16 h-16 bg-emerald-100 rounded-full flex items-center justify-center mx-auto text-3xl">🎉</div>
+          <h1 class="text-2xl font-black">¡Pedido recibido!</h1>
+          <p class="text-gray-500">Tu pedido <span class="font-bold text-gray-900">#${numero}</span> fue enviado.</p>
+          <a href="?view=tracking&id=${id}" class="block w-full py-3 bg-brand-500 text-white rounded-xl font-bold text-sm">Seguir mi pedido</a>
+          <button onclick="location.href='?view=menu${mesaId?'&mesa='+mesaId:''}'" class="block w-full py-3 border border-gray-200 text-gray-600 rounded-xl font-semibold text-sm">Hacer otro pedido</button>
+        </div>
+      </div>
+    `
+  }
+
+  if (!cfg.negocioActivo) {
+    app.innerHTML = `<div class="min-h-screen bg-gray-50 flex items-center justify-center p-4"><div class="text-center"><div class="text-5xl mb-4">🔒</div><h1 class="text-2xl font-black">${escHtml(cfg.nombreNegocio||'Cerrado')}</h1><p class="text-gray-500 mt-2">No estamos aceptando pedidos en este momento.</p></div></div>`
+    return
+  }
+  renderMenu()
+}
+
+// ─── TRACKING ─────────────────────────────────────────────────
+async function renderTracking(id) {
+  const app = document.getElementById('app')
+  if (!id) { app.innerHTML = '<div class="min-h-screen flex items-center justify-center text-gray-400">ID de pedido no encontrado</div>'; return }
+  const load = async () => {
+    const res = await fetch(`${API_URL}?action=getPublicOrder&id=${id}`).then(r=>r.json())
+    if (!res.success) { app.innerHTML = `<div class="min-h-screen flex items-center justify-center text-gray-400">${res.message}</div>`; return }
+    const o = res.data
+    const STEPS = ['NUEVO','EN_COCINA','LISTO','EN_CAMINO','COBRADO']
+    const curIdx = STEPS.indexOf(o.estado)
+    app.innerHTML = `
+      <div class="min-h-screen bg-gray-50 py-8 px-4">
+        <div class="max-w-sm mx-auto space-y-4">
+          <div class="text-center"><h1 class="text-2xl font-black">Pedido #${o.numero}</h1></div>
+          <div class="flex justify-between items-center px-2">
+            ${STEPS.slice(0,-1).map((s,i) => `
+              <div class="flex flex-col items-center gap-1">
+                <div class="w-8 h-8 rounded-full ${i<=curIdx?'bg-brand-500 text-white':'bg-gray-200 text-gray-400'} flex items-center justify-center font-bold text-xs">${i<=curIdx?'✓':i+1}</div>
+                <span class="text-xs text-gray-500 text-center">${['Recibido','Cocina','Listo',o.tipo==='DELIVERY'?'En camino':'Servido'][i]}</span>
+              </div>
+              ${i<STEPS.length-2?`<div class="flex-1 h-0.5 mt-4 ${i<curIdx?'bg-brand-500':'bg-gray-200'}"></div>`:''}`
+            ).join('')}
+          </div>
+          <div class="card p-4 text-center">
+            <p class="text-sm text-gray-500 mb-1">Estado actual</p>
+            <p class="text-xl font-black text-brand-600">${o.estado.replace('_',' ')}</p>
+          </div>
+          <div class="card p-4 space-y-2">
+            ${(o.items||[]).map(i=>`<div class="flex justify-between text-sm"><span>${i.cantidad}x ${escHtml(i.productoNombre)}</span></div>`).join('')}
+            <div class="pt-2 border-t font-black flex justify-between"><span>Total</span><span class="text-brand-600">${'$'} ${(o.total||0).toLocaleString('es-AR')}</span></div>
+          </div>
+          ${o.estado!=='COBRADO'&&o.estado!=='CANCELADO'?'<p class="text-center text-xs text-gray-400">Esta página se actualiza automáticamente</p>':''}
+        </div>
+      </div>
+    `
+    if (o.estado !== 'COBRADO' && o.estado !== 'CANCELADO') setTimeout(load, 15000)
+  }
+  await load()
+}
+
+// ─── INIT ─────────────────────────────────────────────────────
+const sp = new URLSearchParams(location.search)
+if (sp.get('view') === 'menu') renderMenu()
+else if (sp.get('view') === 'tracking') renderTracking(sp.get('id'))
+else navigate(state.session ? 'dashboard' : 'login')
+</script>
+</body>
+</html>
