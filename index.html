@@ -74,7 +74,7 @@ th,td{padding:0}
 // ══════════════════════════════════════════════════════════════
 //  CONFIGURACIÓN — PEGÁ TU URL DE GOOGLE APPS SCRIPT AQUÍ ↓
 // ══════════════════════════════════════════════════════════════
-const API_URL = 'https://script.google.com/macros/s/AKfycbxqQegjMkgncQpN4ouBeRMXHJdET6252Ncw5-PjSFUp4Sshr6M-ZmquS9zhYfDdN-Wlag/exec'
+const API_URL = 'https://script.google.com/macros/s/REEMPLAZA_ESTO_CON_TU_URL_DEL_DEPLOY/exec'
 // ══════════════════════════════════════════════════════════════
 
 // ─── ESTADO GLOBAL ────────────────────────────────────────────
@@ -1233,8 +1233,8 @@ async function viewConfiguracion(el) {
       </div>
       <div class="card p-5 space-y-3">
         <h2 class="font-bold text-gray-700 border-b pb-2 text-sm">Horarios y menú</h2>
-        ${cfgField('HORARIO_APERTURA','Apertura',cfg.HORARIO_APERTURA||'09:00','time')}
-        ${cfgField('HORARIO_CIERRE','Cierre',cfg.HORARIO_CIERRE||'23:00','time')}
+        ${cfgField('HORARIO_APERTURA','Apertura',toTimeInput(cfg.HORARIO_APERTURA)||'09:00','time')}
+        ${cfgField('HORARIO_CIERRE','Cierre',toTimeInput(cfg.HORARIO_CIERRE)||'23:00','time')}
         <div class="grid sm:grid-cols-3 gap-2 items-center">
           <label class="text-sm font-medium text-gray-700">Aceptar pedidos</label>
           <select id="cfg-NEGOCIO_ACTIVO" class="input sm:col-span-2">
@@ -1259,6 +1259,14 @@ async function viewConfiguracion(el) {
       state.config = { symbol: config.SIMBOLO_MONEDA||'$', costoDelivery: parseFloat(config.COSTO_DELIVERY)||0 }
     } else toast(res.message, 'err')
   }
+}
+
+function toTimeInput(v) {
+  if (!v) return ''
+  var s = String(v)
+  if (/^\d{2}:\d{2}/.test(s)) return s.substring(0, 5)
+  var m = s.match(/T(\d{2}:\d{2})/)
+  return m ? m[1] : ''
 }
 
 function cfgField(key, label, value, type='text') {
